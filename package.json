@@ -1,0 +1,34 @@
+{
+  "name": "@pevjant/cc-connect",
+  "version": "1.5.1-pevjant.1",
+  "description": "Fork of cc-connect with mid-turn steering (turn/steer) for codex app-server. Installs the pevjant fork binary instead of upstream.",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "ai-coding",
+    "discord",
+    "telegram",
+    "slack",
+    "chatbot",
+    "bridge"
+  ],
+  "homepage": "https://github.com/pevjant/cc-connect",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pevjant/cc-connect.git"
+  },
+  "license": "MIT",
+  "author": "pevjant",
+  "bin": {
+    "cc-connect": "run.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js",
+    "prepare": "node install.js"
+  },
+  "files": [
+    "install.js",
+    "run.js",
+    "README.md"
+  ]
+}
