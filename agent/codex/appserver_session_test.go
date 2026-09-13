@@ -506,17 +506,17 @@ func waitForWrittenJSONLine(t *testing.T, w *lockedWriteCloser) string {
 
 func TestAppServerListenURL(t *testing.T) {
 	cases := map[string]string{
-		"":                       "",
-		"  ":                     "",
-		"stdio://":               "",
-		"stdio":                  "",
-		"ws://127.0.0.1:3845":    "ws://127.0.0.1:3845",
-		"ws://localhost:9000":    "ws://localhost:9000",
-		"ws://127.0.0.1:3845 ":   "ws://127.0.0.1:3845",
-		" stdio ":                 "",
-		" stdio:// ":               "",
-		"STDIO":                    "",
-		"STDIO://":                 "",
+		"":                     "",
+		"  ":                   "",
+		"stdio://":             "",
+		"stdio":                "",
+		"ws://127.0.0.1:3845":  "ws://127.0.0.1:3845",
+		"ws://localhost:9000":  "ws://localhost:9000",
+		"ws://127.0.0.1:3845 ": "ws://127.0.0.1:3845",
+		" stdio ":              "",
+		" stdio:// ":           "",
+		"STDIO":                "",
+		"STDIO://":             "",
 	}
 	for in, want := range cases {
 		if got := appServerListenURL(in); got != want {
@@ -579,7 +579,7 @@ func TestAppServerSession_SteerSendsTurnSteer(t *testing.T) {
 		t.Fatalf("input[0] = %#v, want text %q", input[0], "checking in?")
 	}
 
-	result, err := json.Marshal(map[string]any{"turn": map[string]any{"id": "turn-1"}})
+	result, err := json.Marshal(map[string]any{"turnId": "turn-1"})
 	if err != nil {
 		t.Fatalf("marshal result: %v", err)
 	}
@@ -633,11 +633,15 @@ func TestAppServerSession_SteerServerError(t *testing.T) {
 	}()
 
 	var req struct {
-		ID     int64  `json:"id"`
-		Method string `json:"method"`
+		ID     int64          `json:"id"`
+		Method string         `json:"method"`
+		Params map[string]any `json:"params"`
 	}
 	if err := json.NewDecoder(pr).Decode(&req); err != nil {
 		t.Fatalf("decode request: %v", err)
+	}
+	if _, has := req.Params["clientUserMessageId"]; has {
+		t.Fatalf("clientUserMessageId = %v, want omitted for empty messageID", req.Params["clientUserMessageId"])
 	}
 	s.handleResponse(rpcResponseEnvelope{
 		ID:    float64(req.ID),

@@ -3258,9 +3258,12 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 
 // steerBusySession delivers a message into the agent's currently running turn
 // when the backend implements AgentSessionSteerer (codex app-server
-// turn/steer, Claude Code stdin queueing). Locking mirrors
-// queueMessageForBusySession. Returns true when the message was delivered or
-// dropped as stale; false means the caller must fall back to the queue path.
+// turn/steer). Locking mirrors queueMessageForBusySession except that
+// state.mu is released across the Steer call: the RPC can block for up to
+// appServerRequestTimeout and everything contending on state.mu (event loop,
+// queue appends, /stop cleanup) must not stall behind it. Returns true when
+// the message was delivered or dropped as stale; false means the caller must
+// fall back to the queue path.
 func (e *Engine) steerBusySession(p Platform, msg *Message, interactiveKey string, sessions *SessionManager, session *Session) bool {
 	// ponytail: steer is text-only; attachment messages take the queue path —
 	// extend Steer's input payload with localImage/file refs when needed.
@@ -3273,39 +3276,57 @@ func (e *Engine) steerBusySession(p Platform, msg *Message, interactiveKey strin
 		e.interactiveMu.Unlock()
 		return false
 	}
+	// Keep interactiveMu only until state.mu is held (same as the queue path),
+	// then release it — every exit path below must not leave it locked.
 	state.mu.Lock()
 	e.interactiveMu.Unlock()
-	defer state.mu.Unlock()
 
-	if state.agentSession == nil || !state.agentSession.Alive() {
-		return false
+	var steerer AgentSessionSteerer
+	ok := false
+	if state.agentSession != nil && state.agentSession.Alive() {
+		steerer, ok = state.agentSession.(AgentSessionSteerer)
 	}
-	steerer, ok := state.agentSession.(AgentSessionSteerer)
 	if !ok {
+		state.mu.Unlock()
 		return false
 	}
 	if e.isStaleUserMessageLocked(state, msg.UserMessageTimeMs) {
 		snap := userMessageWatermarkSnapshotLocked(state)
+		state.mu.Unlock()
 		e.logStaleUserMessageDropped("reject_before_steer", msg, interactiveKey, snap)
 		return true
 	}
-
 	prompt := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+	state.mu.Unlock()
+
+	// If the session dies mid-call, Steer fails and we fall back to the queue
+	// path below, which re-validates liveness on its own.
 	if err := steerer.Steer(prompt, msg.MessageID); err != nil {
-		slog.Debug("steering busy session failed, falling back to queue",
-			"session", msg.SessionKey,
-			"interactive_key", interactiveKey,
-			"error", err,
-		)
+		if errors.Is(err, ErrNoActiveTurn) {
+			// Turn finished between TryLock and Steer — benign race; the
+			// queue path delivers the message after the next turn starts.
+			slog.Debug("steer found no active turn, falling back to queue",
+				"session", msg.SessionKey,
+				"interactive_key", interactiveKey,
+			)
+		} else {
+			slog.Warn("steering busy session failed, falling back to queue",
+				"session", msg.SessionKey,
+				"interactive_key", interactiveKey,
+				"error", err,
+			)
+		}
 		return false
 	}
 
 	runMessageAccepted(msg)
-	// Mirror noteUserMessageAccepted's watermark update under the state.mu we
-	// already hold — that helper re-locks, so inline the write instead.
+	// Mirror noteUserMessageAccepted's watermark update (that helper re-locks,
+	// so write inline). Monotonic, so no staleness recheck is needed.
+	state.mu.Lock()
 	if msg.UserMessageTimeMs > state.currentTurnUserMessageTimeMs {
 		state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
 	}
+	state.mu.Unlock()
 	session.AddHistory("user", msg.Content)
 	sessions.Save()
 

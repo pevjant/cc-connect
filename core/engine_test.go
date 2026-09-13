@@ -10325,11 +10325,12 @@ func TestCmdPs_IdleSession_RepliesNoSession(t *testing.T) {
 type steeringAgentSession struct {
 	*queuingAgentSession
 	steerCalls []string
+	steerErr   error
 }
 
 func (s *steeringAgentSession) Steer(prompt string, messageID string) error {
 	s.steerCalls = append(s.steerCalls, prompt)
-	return nil
+	return s.steerErr
 }
 
 func TestCmdPs_BusySession_InjectsToAgent(t *testing.T) {
@@ -10407,6 +10408,101 @@ func TestCmdPs_UnsupportedBackend_RejectsInsteadOfInjecting(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected MsgPsUnsupported reply, got %v", sent)
+	}
+}
+
+func TestSteerBusySession_FallsBackToQueueOnError(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &steeringAgentSession{
+		queuingAgentSession: newQueuingSession("steer-fail"),
+		steerErr:            errors.New("codex app-server turn/steer: boom"),
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	state := &interactiveState{agentSession: agent, platform: p}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected TryLock to succeed")
+	}
+	defer session.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "hello", ReplyCtx: "ctx"}
+	if e.steerBusySession(p, msg, key, e.sessions, session) {
+		t.Fatal("steerBusySession should return false when Steer fails")
+	}
+	if len(agent.steerCalls) != 1 {
+		t.Fatalf("expected exactly one Steer attempt, got %d", len(agent.steerCalls))
+	}
+}
+
+func TestSteerBusySession_AttachmentsSkipSteer(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &steeringAgentSession{queuingAgentSession: newQueuingSession("steer-attach")}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	state := &interactiveState{agentSession: agent, platform: p}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected TryLock to succeed")
+	}
+	defer session.Unlock()
+
+	msg := &Message{
+		SessionKey: key,
+		Content:    "look at this",
+		ReplyCtx:   "ctx",
+		Images:     []ImageAttachment{{MimeType: "image/png", Data: []byte("x")}},
+	}
+	if e.steerBusySession(p, msg, key, e.sessions, session) {
+		t.Fatal("attachment messages should not take the steer path")
+	}
+	if len(agent.steerCalls) != 0 {
+		t.Fatalf("Steer must not be called for attachment messages, got %v", agent.steerCalls)
+	}
+}
+
+func TestSteerBusySession_DropsStaleMessageWithoutAck(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &steeringAgentSession{queuingAgentSession: newQueuingSession("steer-stale")}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession:                 agent,
+		platform:                     p,
+		currentTurnUserMessageTimeMs: 2000,
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected TryLock to succeed")
+	}
+	defer session.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "old message", ReplyCtx: "ctx", UserMessageTimeMs: 1000}
+	if !e.steerBusySession(p, msg, key, e.sessions, session) {
+		t.Fatal("stale message should be reported as handled")
+	}
+	if len(agent.steerCalls) != 0 {
+		t.Fatalf("Steer must not be called for stale messages, got %v", agent.steerCalls)
+	}
+	for _, s := range p.getSent() {
+		if strings.Contains(s, e.i18n.T(MsgMessageSteered)) {
+			t.Fatalf("stale message must not get a steered ack, got %v", p.getSent())
+		}
 	}
 }
 

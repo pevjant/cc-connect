@@ -64,6 +64,12 @@ type turnStartResponse struct {
 	} `json:"turn"`
 }
 
+// turnSteerResponse matches the codex turn/steer reply: {"turnId": string}.
+// Unlike turn/start, there is no nested turn object.
+type turnSteerResponse struct {
+	TurnID string `json:"turnId"`
+}
+
 type turnNotification struct {
 	ThreadID string `json:"threadId"`
 	Turn     struct {
@@ -566,9 +572,12 @@ func (s *appServerSession) Steer(prompt string, messageID string) error {
 		params["clientUserMessageId"] = messageID
 	}
 
-	var resp turnStartResponse
+	var resp turnSteerResponse
 	if err := s.request("turn/steer", params, &resp); err != nil {
 		return fmt.Errorf("codex app-server turn/steer: %w", err)
+	}
+	if resp.TurnID == "" {
+		return fmt.Errorf("codex app-server turn/steer returned empty turn id")
 	}
 	return nil
 }

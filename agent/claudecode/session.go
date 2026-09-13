@@ -976,14 +976,12 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 // Images are sent as base64 in the multimodal content array.
 // Files are saved to local temp files and referenced in the text prompt
 // so Claude Code can read them with its built-in tools.
-// Steer forwards the prompt to the persistent Claude Code process's stdin.
-// Claude Code queues mid-turn stdin prompts and emits the running turn's
-// result first, so a write here is safe as mid-turn delivery (the same path
-// the /ps command uses).
-func (cs *claudeSession) Steer(prompt string, messageID string) error {
-	return cs.Send(prompt, messageID, nil, nil)
-}
-
+//
+// This session deliberately does NOT implement AgentSessionSteerer: a
+// mid-turn stdin write makes Claude Code emit the running turn's result and
+// then process the injected prompt as a separate turn, which breaks the
+// engine's one-EventResult-per-turn correlation (permission prompts would be
+// auto-denied as unsolicited). Busy messages must take the queue path.
 func (cs *claudeSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !cs.alive.Load() {
 		return fmt.Errorf("session process is not running")
