@@ -23,8 +23,7 @@
     "cc-connect": "run.js"
   },
   "scripts": {
-    "postinstall": "node install.js",
-    "prepare": "node install.js"
+    "postinstall": "node install.js"
   },
   "files": [
     "install.js",
