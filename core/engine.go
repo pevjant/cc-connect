@@ -3044,6 +3044,11 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 			return
 		}
+		// Session is busy — offer the message to the running turn when the
+		// backend supports mid-turn steering; fall back to queueing otherwise.
+		if e.steerBusySession(p, msg, interactiveKey, sessions, session) {
+			return
+		}
 		// Session is busy — try to queue the message for the running turn
 		// so the agent processes it immediately after the current turn ends.
 		if e.queueMessageForBusySession(p, msg, interactiveKey) {
@@ -3248,6 +3253,69 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"queue_depth", queueDepth,
 	)
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	return true
+}
+
+// steerBusySession delivers a message into the agent's currently running turn
+// when the backend implements AgentSessionSteerer (codex app-server
+// turn/steer, Claude Code stdin queueing). Locking mirrors
+// queueMessageForBusySession. Returns true when the message was delivered or
+// dropped as stale; false means the caller must fall back to the queue path.
+func (e *Engine) steerBusySession(p Platform, msg *Message, interactiveKey string, sessions *SessionManager, session *Session) bool {
+	// ponytail: steer is text-only; attachment messages take the queue path —
+	// extend Steer's input payload with localImage/file refs when needed.
+	if len(msg.Images) > 0 || len(msg.Files) > 0 {
+		return false
+	}
+	e.interactiveMu.Lock()
+	state, hasState := e.interactiveStates[interactiveKey]
+	if !hasState || state == nil {
+		e.interactiveMu.Unlock()
+		return false
+	}
+	state.mu.Lock()
+	e.interactiveMu.Unlock()
+	defer state.mu.Unlock()
+
+	if state.agentSession == nil || !state.agentSession.Alive() {
+		return false
+	}
+	steerer, ok := state.agentSession.(AgentSessionSteerer)
+	if !ok {
+		return false
+	}
+	if e.isStaleUserMessageLocked(state, msg.UserMessageTimeMs) {
+		snap := userMessageWatermarkSnapshotLocked(state)
+		e.logStaleUserMessageDropped("reject_before_steer", msg, interactiveKey, snap)
+		return true
+	}
+
+	prompt := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+	if err := steerer.Steer(prompt, msg.MessageID); err != nil {
+		slog.Debug("steering busy session failed, falling back to queue",
+			"session", msg.SessionKey,
+			"interactive_key", interactiveKey,
+			"error", err,
+		)
+		return false
+	}
+
+	runMessageAccepted(msg)
+	// Mirror noteUserMessageAccepted's watermark update under the state.mu we
+	// already hold — that helper re-locks, so inline the write instead.
+	if msg.UserMessageTimeMs > state.currentTurnUserMessageTimeMs {
+		state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
+	}
+	session.AddHistory("user", msg.Content)
+	sessions.Save()
+
+	slog.Info("message steered into running turn",
+		"session", msg.SessionKey,
+		"user", msg.UserName,
+		"interactive_key", interactiveKey,
+		"msg_id", msg.MessageID,
+	)
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageSteered))
 	return true
 }
 
@@ -6572,8 +6640,16 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
 		return
 	}
-	if err := state.agentSession.Send(text, "", nil, nil); err != nil {
-		slog.Error("ps: send failed", "error", err)
+	// Steering is the only safe mid-turn delivery path: backends without
+	// AgentSessionSteerer would either corrupt their event stream (codex exec
+	// spawning a parallel process) or race the session lock.
+	steerer, ok := state.agentSession.(AgentSessionSteerer)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsUnsupported))
+		return
+	}
+	if err := steerer.Steer(text, ""); err != nil {
+		slog.Error("ps: steer failed", "error", err)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSendFailed))
 		return
 	}

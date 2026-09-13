@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -521,5 +522,134 @@ func TestAppServerListenURL(t *testing.T) {
 		if got := appServerListenURL(in); got != want {
 			t.Errorf("appServerListenURL(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestAppServerSession_SteerSendsTurnSteer(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	defer func() { _ = pr.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s := &appServerSession{
+		ctx:         ctx,
+		cancel:      cancel,
+		events:      make(chan core.Event, 2),
+		stdin:       pw,
+		pending:     make(map[int64]chan rpcResponseEnvelope),
+		currentTurn: "turn-1",
+	}
+	s.alive.Store(true)
+	s.threadID.Store("thread-1")
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Steer("checking in?", "msg-42")
+	}()
+
+	var req struct {
+		JSONRPC string         `json:"jsonrpc"`
+		ID      int64          `json:"id"`
+		Method  string         `json:"method"`
+		Params  map[string]any `json:"params"`
+	}
+	if err := json.NewDecoder(pr).Decode(&req); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	if req.Method != "turn/steer" {
+		t.Fatalf("method = %q, want turn/steer", req.Method)
+	}
+	if req.Params["threadId"] != "thread-1" {
+		t.Fatalf("threadId = %v, want thread-1", req.Params["threadId"])
+	}
+	if req.Params["expectedTurnId"] != "turn-1" {
+		t.Fatalf("expectedTurnId = %v, want turn-1", req.Params["expectedTurnId"])
+	}
+	if req.Params["clientUserMessageId"] != "msg-42" {
+		t.Fatalf("clientUserMessageId = %v, want msg-42", req.Params["clientUserMessageId"])
+	}
+	input, ok := req.Params["input"].([]any)
+	if !ok || len(input) != 1 {
+		t.Fatalf("input = %#v, want one element", req.Params["input"])
+	}
+	first, _ := input[0].(map[string]any)
+	if first["type"] != "text" || first["text"] != "checking in?" {
+		t.Fatalf("input[0] = %#v, want text %q", input[0], "checking in?")
+	}
+
+	result, err := json.Marshal(map[string]any{"turn": map[string]any{"id": "turn-1"}})
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	s.handleResponse(rpcResponseEnvelope{ID: float64(req.ID), Result: result})
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Steer returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Steer did not return after response")
+	}
+}
+
+func TestAppServerSession_SteerNoActiveTurn(t *testing.T) {
+	s := &appServerSession{
+		events:  make(chan core.Event, 1),
+		pending: make(map[int64]chan rpcResponseEnvelope),
+	}
+	s.alive.Store(true)
+
+	err := s.Steer("hello", "msg-1")
+	if !errors.Is(err, core.ErrNoActiveTurn) {
+		t.Fatalf("err = %v, want core.ErrNoActiveTurn", err)
+	}
+}
+
+func TestAppServerSession_SteerServerError(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	defer func() { _ = pr.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s := &appServerSession{
+		ctx:         ctx,
+		cancel:      cancel,
+		events:      make(chan core.Event, 2),
+		stdin:       pw,
+		pending:     make(map[int64]chan rpcResponseEnvelope),
+		currentTurn: "turn-1",
+	}
+	s.alive.Store(true)
+	s.threadID.Store("thread-1")
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Steer("hello", "")
+	}()
+
+	var req struct {
+		ID     int64  `json:"id"`
+		Method string `json:"method"`
+	}
+	if err := json.NewDecoder(pr).Decode(&req); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	s.handleResponse(rpcResponseEnvelope{
+		ID:    float64(req.ID),
+		Error: &rpcError{Code: -32600, Message: "no active turn to steer"},
+	})
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "no active turn to steer") {
+			t.Fatalf("err = %v, want turn/steer failure", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Steer did not return after error response")
 	}
 }

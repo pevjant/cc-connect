@@ -10321,9 +10321,20 @@ func TestCmdPs_IdleSession_RepliesNoSession(t *testing.T) {
 	}
 }
 
+// steeringAgentSession records Steer calls on top of a queuing session.
+type steeringAgentSession struct {
+	*queuingAgentSession
+	steerCalls []string
+}
+
+func (s *steeringAgentSession) Steer(prompt string, messageID string) error {
+	s.steerCalls = append(s.steerCalls, prompt)
+	return nil
+}
+
 func TestCmdPs_BusySession_InjectsToAgent(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
-	sess := newQueuingSession("ps-busy")
+	sess := &steeringAgentSession{queuingAgentSession: newQueuingSession("ps-busy")}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 
 	key := "test:user1"
@@ -10342,11 +10353,8 @@ func TestCmdPs_BusySession_InjectsToAgent(t *testing.T) {
 	msg := &Message{SessionKey: key, Content: "/ps add unit tests", ReplyCtx: "ctx"}
 	e.cmdPs(p, msg, []string{"add", "unit", "tests"})
 
-	sess.sendMu.Lock()
-	calls := append([]string(nil), sess.sendCalls...)
-	sess.sendMu.Unlock()
-	if len(calls) != 1 || calls[0] != "add unit tests" {
-		t.Fatalf("expected Send(\"add unit tests\"), got %v", calls)
+	if len(sess.steerCalls) != 1 || sess.steerCalls[0] != "add unit tests" {
+		t.Fatalf("expected Steer(\"add unit tests\"), got %v", sess.steerCalls)
 	}
 
 	sent := p.getSent()
@@ -10359,6 +10367,46 @@ func TestCmdPs_BusySession_InjectsToAgent(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected MsgPsSent reply, got %v", sent)
+	}
+}
+
+func TestCmdPs_UnsupportedBackend_RejectsInsteadOfInjecting(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("ps-busy") // no Steer method — e.g. codex exec
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	state := &interactiveState{agentSession: sess, platform: p}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected TryLock to succeed")
+	}
+	defer session.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "/ps add unit tests", ReplyCtx: "ctx"}
+	e.cmdPs(p, msg, []string{"add", "unit", "tests"})
+
+	sess.sendMu.Lock()
+	calls := append([]string(nil), sess.sendCalls...)
+	sess.sendMu.Unlock()
+	if len(calls) != 0 {
+		t.Fatalf("expected no Send calls on non-steering backend, got %v", calls)
+	}
+
+	sent := p.getSent()
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, e.i18n.T(MsgPsUnsupported)) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected MsgPsUnsupported reply, got %v", sent)
 	}
 }
 

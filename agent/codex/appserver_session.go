@@ -532,6 +532,47 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 	return nil
 }
 
+// Steer delivers input into the currently running turn via the codex
+// app-server "turn/steer" RPC (codex >= 0.99). Steering creates no new turn
+// and emits no turn/started notification, so the engine's single
+// EventResult-per-turn correlation stays intact. Returns core.ErrNoActiveTurn
+// when no turn is in flight; callers fall back to queueing in that case.
+func (s *appServerSession) Steer(prompt string, messageID string) error {
+	if !s.alive.Load() {
+		return fmt.Errorf("session is closed")
+	}
+	s.stateMu.Lock()
+	turnID := s.currentTurn
+	s.stateMu.Unlock()
+	if turnID == "" {
+		return core.ErrNoActiveTurn
+	}
+
+	threadID := s.CurrentSessionID()
+	if threadID == "" {
+		return fmt.Errorf("codex app-server thread id is empty")
+	}
+
+	params := map[string]any{
+		"threadId": threadID,
+		"input": []map[string]any{{
+			"type":          "text",
+			"text":          prompt,
+			"text_elements": []any{},
+		}},
+		"expectedTurnId": turnID,
+	}
+	if messageID != "" {
+		params["clientUserMessageId"] = messageID
+	}
+
+	var resp turnStartResponse
+	if err := s.request("turn/steer", params, &resp); err != nil {
+		return fmt.Errorf("codex app-server turn/steer: %w", err)
+	}
+	return nil
+}
+
 func (s *appServerSession) stageImages(prompt string, images []core.ImageAttachment) (string, []string, error) {
 	if len(images) == 0 {
 		return prompt, nil, nil

@@ -209,6 +209,8 @@ const (
 	MsgPreviousProcessing        MsgKey = "previous_processing"
 	MsgQueueFull                 MsgKey = "queue_full"
 	MsgMessageQueued             MsgKey = "message_queued"
+	MsgMessageSteered            MsgKey = "message_steered"
+	MsgPsUnsupported             MsgKey = "ps_unsupported"
 	MsgNoToolsAllowed            MsgKey = "no_tools_allowed"
 	MsgCurrentTools              MsgKey = "current_tools"
 	MsgCurrentSession            MsgKey = "current_session"
@@ -803,6 +805,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "📬 訊息已收到，將在目前任務完成後處理。",
 		LangJapanese:           "📬 メッセージを受信しました。現在のタスク完了後に処理します。",
 		LangSpanish:            "📬 Mensaje recibido — se procesará después de que termine la tarea actual.",
+	},
+	MsgMessageSteered: {
+		LangEnglish:            "📨 Delivered to the running task.",
+		LangChinese:            "📨 已送达正在执行的任务。",
+		LangTraditionalChinese: "📨 已送達正在執行的任務。",
+		LangJapanese:           "📨 実行中のタスクに届けました。",
+		LangSpanish:            "📨 Entregado a la tarea en curso.",
+	},
+	MsgPsUnsupported: {
+		LangEnglish:            "This agent backend does not support mid-turn delivery (/ps).",
+		LangChinese:            "该 agent 后端不支持回合中送达（/ps）。",
+		LangTraditionalChinese: "該 agent 後端不支援回合中送達（/ps）。",
+		LangJapanese:           "このエージェントバックエンドはターン中の送信（/ps）に対応していません。",
+		LangSpanish:            "Este backend de agente no admite el envío a mitad de turno (/ps).",
 	},
 	MsgQueueFull: {
 		LangEnglish:            "📬 Message queue is full (%d pending). Please wait for current tasks to complete.",

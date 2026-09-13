@@ -531,6 +531,21 @@ type AgentSessionCanceller interface {
 	CancelTurn() error
 }
 
+// ErrNoActiveTurn is returned by AgentSessionSteerer.Steer when no turn is
+// currently in flight, so the message must go through the normal queue path.
+var ErrNoActiveTurn = errors.New("no active turn to steer")
+
+// AgentSessionSteerer is an optional interface for agent sessions that support
+// mid-turn steering: delivering a user message into the currently running turn
+// without starting a new turn (codex app-server turn/steer, Claude Code stdin
+// queueing). When implemented, the engine offers messages arriving on a busy
+// session to Steer first and falls back to queueing when it returns an error.
+// Because steering creates no new turn, the engine's one-EventResult-per-turn
+// correlation is preserved.
+type AgentSessionSteerer interface {
+	Steer(prompt string, messageID string) error
+}
+
 // CommandProvider is an optional interface for agents that expose custom slash
 // commands via local files (e.g. .claude/commands/*.md). The engine scans the
 // returned directories for *.md files and registers them as slash commands.
