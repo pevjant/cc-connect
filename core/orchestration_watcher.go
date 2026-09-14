@@ -39,6 +39,12 @@ const (
 // redelivery backoff.
 var orchestrationRetryInterval = 10 * time.Second
 
+// orchestrationStallWaits is how many consecutive empty check --wait rounds
+// (~15 min each) trigger a stall warning into the session — the watcher's
+// replacement for the coordinator's old "three empty waits → enumerate
+// workers" second-line verification.
+const orchestrationStallWaits = 2
+
 // watchIDRe constrains externally supplied ids before they reach exec argv
 // or file paths (fixed argv arrays only, never shell strings).
 var watchIDRe = regexp.MustCompile(`^[A-Za-z0-9._:@/-]{1,200}$`)
@@ -316,6 +322,8 @@ func (m *OrchestrationManager) runWatch(ctx context.Context, w *OrchestrationWat
 	m.mu.Unlock()
 
 	backoff := 2 * time.Second
+	emptyWaits := 0
+	stallWarned := false
 	var lastAck string
 	for {
 		if ctx.Err() != nil {
@@ -360,8 +368,23 @@ func (m *OrchestrationManager) runWatch(ctx context.Context, w *OrchestrationWat
 			continue
 		}
 		if len(deliveries) == 0 {
-			continue // wait timeout — checkpoint, keep rolling
+			// Wait timeout — checkpoint, keep rolling. Silence is not failure,
+			// but a worker that died silently also produces empty waits, so
+			// after repeated rounds surface a stall warning into the session
+			// (the coordinator's old second-line check, now daemon-side).
+			// Warn once per silent episode; any delivery re-arms the counter.
+			if !stallWarned {
+				emptyWaits++
+				if emptyWaits >= orchestrationStallWaits {
+					emptyWaits = 0
+					stallWarned = true
+					m.notifyStall(ctx, w)
+				}
+			}
+			continue
 		}
+		emptyWaits = 0
+		stallWarned = false
 
 		for _, d := range deliveries {
 			if ctx.Err() != nil {
@@ -480,6 +503,35 @@ func (m *OrchestrationManager) deliverPending(ctx context.Context, w *Orchestrat
 			return
 		}
 	}
+}
+
+// notifyStall surfaces a stalled run into the session: no delivery for
+// ~15min × orchestrationStallWaits. It snapshots worker liveness
+// (worker-list) so the coordinator can decide recovery — it never
+// stops/abandons workers on its own.
+func (m *OrchestrationManager) notifyStall(ctx context.Context, w *OrchestrationWatch) {
+	snapshot := ""
+	if out, err := m.checkRunner(ctx, []string{"orchestration", "worker-list", "--include-remote", "--json"}); err != nil {
+		snapshot = fmt.Sprintf("worker-list failed: %v", err)
+	} else {
+		snapshot = truncateStr(string(out), 1500)
+	}
+	quietMin := orchestrationWaitTimeoutMS * int64(orchestrationStallWaits) / 60000
+	prompt := fmt.Sprintf(`[orchestration] Orca watch stall warning — no delivery for ~%d minutes on run %s.
+
+Worker liveness snapshot:
+%s
+
+A worker may be stuck or dead. Inspect with 'orca orchestration worker-list --include-remote --json'; if one is dead, recover explicitly (orca orchestration worker-stop / worker-abandon) or cancel this watch (cc-connect orchestration cancel --run %s). Results already produced are preserved in Orca. Do NOT start a new orchestration wait for this run.`,
+		quietMin, w.RunID, snapshot, w.RunID)
+
+	if err := m.injectFn(w.Project, w.SessionKey, prompt); err != nil {
+		// Busy session: the next stall round retries. Fire-and-notify only —
+		// stall warnings are not persisted as pending.
+		slog.Debug("orchestration stall warning deferred", "run_id", w.RunID, "error", err)
+		return
+	}
+	slog.Warn("orchestration stall warning delivered", "run_id", w.RunID, "quiet_minutes", quietMin)
 }
 
 func watchIsTerminal(m *OrchestrationManager, w *OrchestrationWatch) bool {

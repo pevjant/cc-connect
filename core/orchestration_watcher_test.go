@@ -172,6 +172,62 @@ func TestOrchestrationRunnerHeartbeatsThenDone(t *testing.T) {
 	m.Stop()
 }
 
+// TestOrchestrationStallNotification pins the second-line verification: two
+// consecutive empty waits produce a stall warning injected into the session
+// (with a worker-list snapshot), and a heartbeat resets the stall counter.
+func TestOrchestrationStallNotification(t *testing.T) {
+	dir := t.TempDir()
+	m := NewOrchestrationManager(dir)
+
+	oldRetry := orchestrationRetryInterval
+	orchestrationRetryInterval = 20 * time.Millisecond
+	defer func() { orchestrationRetryInterval = oldRetry }()
+
+	var waitCalls int
+	var injected []string
+	m.checkRunner = func(ctx context.Context, args []string) ([]byte, error) {
+		hasWait, hasAck := false, false
+		for _, a := range args {
+			switch a {
+			case "--wait":
+				hasWait = true
+			case "--ack":
+				hasAck = true
+			}
+		}
+		if hasAck && !hasWait {
+			return []byte(`{"ok":true,"result":null}`), nil
+		}
+		for _, a := range args {
+			if a == "worker-list" {
+				return []byte(`{"ok":true,"result":{"rows":[{"id":"dispatch_1","type":"liveness","status":"exited"}]}}`), nil
+			}
+		}
+		waitCalls++
+		return []byte(`{"ok":true,"result":{"deliveries":[]}}`), nil // empty batch
+	}
+	m.injectFn = func(project, sessionKey, content string) error {
+		injected = append(injected, content)
+		return nil
+	}
+
+	if _, _, err := m.RegisterWatch("proj", "discord:chan", "run_stall", []string{"task_never"}); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for len(injected) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("stall warning never injected; waitCalls=%d", waitCalls)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(injected[0], "stall warning") || !strings.Contains(injected[0], "run_stall") || !strings.Contains(injected[0], "exited") {
+		t.Fatalf("stall prompt missing details:\n%s", injected[0])
+	}
+	m.Stop()
+}
+
 func TestExtractCheckDeliveries(t *testing.T) {
 	deliveries, err := extractCheckDeliveries([]byte(workerDoneJSON("d-1", "t-9")))
 	if err != nil {
