@@ -38,8 +38,8 @@ func runOrchestration(args []string) {
 			printOrchestrationUsage()
 			os.Exit(1)
 		}
-		if req.RunID == "" || req.SessionKey == "" {
-			fmt.Fprintf(os.Stderr, "Error: --run and --session are required\n")
+		if req.RunID == "" {
+			fmt.Fprintf(os.Stderr, "Error: --run is required\n")
 			printOrchestrationUsage()
 			os.Exit(1)
 		}

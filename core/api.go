@@ -798,8 +798,8 @@ func (s *APIServer) handleOrchestrationWatch(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.RunID == "" || req.SessionKey == "" {
-		http.Error(w, "run_id and session_key are required", http.StatusBadRequest)
+	if req.RunID == "" {
+		http.Error(w, "run_id is required", http.StatusBadRequest)
 		return
 	}
 
@@ -818,7 +818,27 @@ func (s *APIServer) handleOrchestrationWatch(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	watch, deduplicated, err := mgr.RegisterWatch(project, req.SessionKey, req.RunID, req.TaskIDs)
+	// Resolve session_key: explicit, or auto-detect when the project has
+	// exactly one active session (the coordinator agent does not know its
+	// own session key).
+	sessionKey := req.SessionKey
+	if sessionKey == "" {
+		s.mu.RLock()
+		engine := s.engines[project]
+		s.mu.RUnlock()
+		if engine != nil {
+			keys := engine.ActiveSessionKeys()
+			if len(keys) == 1 {
+				sessionKey = keys[0]
+			}
+		}
+	}
+	if sessionKey == "" {
+		http.Error(w, "session_key is required: pass --session or ensure exactly one active session exists", http.StatusBadRequest)
+		return
+	}
+
+	watch, deduplicated, err := mgr.RegisterWatch(project, sessionKey, req.RunID, req.TaskIDs)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
