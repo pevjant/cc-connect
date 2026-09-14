@@ -1,6 +1,6 @@
 {
   "name": "@pevjant/cc-connect",
-  "version": "1.5.1-pevjant.1",
+  "version": "1.5.2-pevjant.1",
   "description": "Fork of cc-connect with mid-turn steering (turn/steer) for codex app-server. Installs the pevjant fork binary instead of upstream.",
   "keywords": [
     "claude-code",
