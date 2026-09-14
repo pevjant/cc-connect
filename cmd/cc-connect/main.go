@@ -213,21 +213,22 @@ var topLevelCommandHandlers = map[string]func([]string){
 	"check-update": func(_ []string) {
 		checkUpdate()
 	},
-	"provider":  runProviderCommand,
-	"send":      runSend,
-	"cron":      runCron,
-	"timer":     runTimer,
-	"at":        runTimer,
-	"relay":     runRelay,
-	"sessions":  runSessions,
-	"agent-sid": runAgentSID,
-	"daemon":    runDaemon,
-	"feishu":    runFeishu,
-	"tuitui":    runTuiTui,
-	"weixin":    runWeixin,
-	"yuanbao":   runYuanbao,
-	"doctor":    runDoctor,
-	"web":       runWeb,
+	"provider":      runProviderCommand,
+	"send":          runSend,
+	"orchestration": runOrchestration,
+	"cron":          runCron,
+	"timer":         runTimer,
+	"at":            runTimer,
+	"relay":         runRelay,
+	"sessions":      runSessions,
+	"agent-sid":     runAgentSID,
+	"daemon":        runDaemon,
+	"feishu":        runFeishu,
+	"tuitui":        runTuiTui,
+	"weixin":        runWeixin,
+	"yuanbao":       runYuanbao,
+	"doctor":        runDoctor,
+	"web":           runWeb,
 }
 
 func main() {
@@ -1257,11 +1258,13 @@ func main() {
 
 	// Start internal API server for CLI send
 	apiSrv, err := core.NewAPIServer(cfg.DataDir)
+	orchMgr := core.NewOrchestrationManager(cfg.DataDir)
 	if err != nil {
 		slog.Warn("api server unavailable", "error", err)
 	} else {
 		globalAPIServer = apiSrv
 		apiSrv.SetMaxAttachmentSize(resolveMaxAttachmentSize(cfg))
+		apiSrv.SetOrchestrationManager(orchMgr)
 
 		relayMgr := core.NewRelayManager(cfg.DataDir)
 		if cfg.Relay.TimeoutSecs != nil {
@@ -1280,6 +1283,7 @@ func main() {
 
 		for i, e := range engines {
 			apiSrv.RegisterEngine(cfg.Projects[i].Name, e)
+			orchMgr.RegisterEngine(cfg.Projects[i].Name, e)
 			e.SetRelayManager(relayMgr)
 			e.SetDirHistory(dirHistory)
 
@@ -1295,6 +1299,9 @@ func main() {
 		}
 		if timerSched != nil {
 			apiSrv.SetTimerScheduler(timerSched)
+		}
+		if err := orchMgr.Resume(); err != nil {
+			slog.Warn("orchestration watch resume failed", "error", err)
 		}
 		apiSrv.Start()
 	}
@@ -1325,6 +1332,7 @@ func main() {
 	}
 
 	slog.Info("shutting down...")
+	orchMgr.Stop()
 	if mgmtSrv != nil {
 		mgmtSrv.Stop()
 	}

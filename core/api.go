@@ -23,14 +23,15 @@ const DefaultMaxAttachmentSize int64 = 50 << 20
 // APIServer exposes a local Unix socket API for external tools (e.g. cron jobs)
 // to send messages to active sessions.
 type APIServer struct {
-	socketPath string
-	listener   net.Listener
-	server     *http.Server
-	mux        *http.ServeMux
-	engines    map[string]*Engine // project name → engine
-	cron       *CronScheduler
-	timer      *TimerScheduler
-	relay      *RelayManager
+	socketPath    string
+	listener      net.Listener
+	server        *http.Server
+	mux           *http.ServeMux
+	engines       map[string]*Engine // project name → engine
+	cron          *CronScheduler
+	timer         *TimerScheduler
+	relay         *RelayManager
+	orchestration *OrchestrationManager
 	// maxAttachmentBytes caps the raw size of a single attachment accepted by
 	// /send; the request body limit in handleSend is derived from it (base64
 	// expansion + envelope). Defaults to DefaultMaxAttachmentSize.
@@ -105,6 +106,9 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	s.mux.HandleFunc("/relay/send", s.handleRelaySend)
 	s.mux.HandleFunc("/relay/bind", s.handleRelayBind)
 	s.mux.HandleFunc("/relay/binding", s.handleRelayBinding)
+	s.mux.HandleFunc("/orchestration/watch", s.handleOrchestrationWatch)
+	s.mux.HandleFunc("/orchestration/status", s.handleOrchestrationStatus)
+	s.mux.HandleFunc("/orchestration/cancel", s.handleOrchestrationCancel)
 
 	return s, nil
 }
@@ -753,6 +757,125 @@ func (s *APIServer) handleTimerDel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	apiJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": req.ID})
+}
+
+// ── Orchestration watch API ───────────────────────────────────
+
+// SetOrchestrationManager wires the daemon-side orchestration watcher.
+func (s *APIServer) SetOrchestrationManager(m *OrchestrationManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.orchestration = m
+}
+
+func (s *APIServer) orchestrationManager() *OrchestrationManager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.orchestration
+}
+
+// OrchestrationWatchRequest is the JSON body for POST /orchestration/watch.
+type OrchestrationWatchRequest struct {
+	Project    string   `json:"project"`
+	SessionKey string   `json:"session_key"`
+	RunID      string   `json:"run_id"`
+	TaskIDs    []string `json:"task_ids"`
+}
+
+func (s *APIServer) handleOrchestrationWatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	mgr := s.orchestrationManager()
+	if mgr == nil {
+		http.Error(w, "orchestration watcher not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req OrchestrationWatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.RunID == "" || req.SessionKey == "" {
+		http.Error(w, "run_id and session_key are required", http.StatusBadRequest)
+		return
+	}
+
+	project := req.Project
+	if project == "" {
+		s.mu.RLock()
+		if len(s.engines) == 1 {
+			for name := range s.engines {
+				project = name
+			}
+		}
+		s.mu.RUnlock()
+	}
+	if project == "" {
+		http.Error(w, "project is required (multiple projects configured)", http.StatusBadRequest)
+		return
+	}
+
+	watch, deduplicated, err := mgr.RegisterWatch(project, req.SessionKey, req.RunID, req.TaskIDs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	apiJSON(w, http.StatusOK, map[string]any{
+		"watch_id":     watch.ID,
+		"status":       watch.Status,
+		"deduplicated": deduplicated,
+	})
+}
+
+func (s *APIServer) handleOrchestrationStatus(w http.ResponseWriter, r *http.Request) {
+	mgr := s.orchestrationManager()
+	if mgr == nil {
+		http.Error(w, "orchestration watcher not available", http.StatusServiceUnavailable)
+		return
+	}
+	runID := r.URL.Query().Get("run_id")
+	if runID != "" {
+		watch := mgr.GetWatch(runID)
+		if watch == nil {
+			http.Error(w, fmt.Sprintf("watch %q not found", runID), http.StatusNotFound)
+			return
+		}
+		apiJSON(w, http.StatusOK, watch)
+		return
+	}
+	apiJSON(w, http.StatusOK, mgr.ListWatches())
+}
+
+func (s *APIServer) handleOrchestrationCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	mgr := s.orchestrationManager()
+	if mgr == nil {
+		http.Error(w, "orchestration watcher not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		RunID string `json:"run_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.RunID == "" {
+		http.Error(w, "run_id is required", http.StatusBadRequest)
+		return
+	}
+	if err := mgr.CancelWatch(req.RunID); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	apiJSON(w, http.StatusOK, map[string]string{"status": "ok", "run_id": req.RunID})
 }
 
 // ── Relay API ──────────────────────────────────────────────────
